@@ -4,7 +4,6 @@ import uuid
 import random
 from threading import Thread
 from time import sleep
-from pyngrok import ngrok
 
 from game_logic.mahjong import (
     create_deck,
@@ -666,23 +665,6 @@ def on_chat_message(data):
 @socketio.on('connect')
 def on_connect():
      emit('connection_success', {'message': 'Connected successfully!'}, broadcast=True)
-
-
-PORT = 5000
-try:
-    # Set your Ngrok access token
-    ngrok.set_auth_token(NGROK_ACCESS_TOKEN)
-
-    # Disconnect any existing tunnels
-    for tunnel in ngrok.get_tunnels():
-        ngrok.disconnect(tunnel.public_url)
-
-    # Open an Ngrok tunnel with the reserved subdomain
-    public_url = ngrok.connect(PORT, domain=NGROK_DOMAIN)
-    print("Ngrok tunnel available at:", public_url)
-except Exception as e:
-    print(f"Failed to setup Ngrok tunnel: {str(e)}")
-    print("Continuing without Ngrok tunnel...")
 
 if __name__ == '__main__':
     socketio.run(app, port=5000, debug=True)
