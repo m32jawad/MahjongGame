@@ -115,6 +115,11 @@ def handle_ai_turn(room_id: str, bot_username: str):
                     'meld_type': 'kong'
                })
                meld_claimed = True
+               
+    if not deck:
+        socketio.emit('game_over',{'winner':None,'score_table':room_id["scores"],'reason':'draw—no tiles left'},room=room_id)
+        return
+    
     if deck and not meld_claimed:
         drawn = deck.pop(0)
         room_data["game_state"]["players_hands"][position].append(drawn)
@@ -196,7 +201,8 @@ def ai_discard_tile(room_id: str, username: str):
         new_scores = settle_scores(room_id, username, score)
         socketio.emit('game_over', {
             'winner': username,
-            'score_table': new_scores
+            'score_table': new_scores,
+            'reason': 'win'
         }, room=room_id)
 
     update_hand_counts(room_id)
@@ -353,6 +359,9 @@ def on_draw_tile(data):
         emit('error', {'message': 'No more tiles to draw.'})
         return
 
+    if not deck:
+            socketio.emit('game_over',{'winner':None,'score_table':rd["scores"],'reason':'draw—no tiles left'},room=rd["room"])
+            return
     tile = deck.pop(0)
     rd["game_state"]["players_hands"][pos].append(tile)
 
@@ -421,7 +430,8 @@ def on_discard_tile(data):
         new_scores = settle_scores(room, user, score)
         socketio.emit('game_over', {
             'winner': user,
-            'score_table': new_scores
+            'score_table': new_scores,
+            "reason": 'win'
         }, room=room)
         return
 
@@ -504,7 +514,50 @@ def compute_score(hand, melds, win_details):
          score += 2
     return score
 
-def settle_scores(room, winner, win_score):
+
+
+def settle_scores(room, winner=None, win_score=0):
+    room_data = rooms[room]
+    scores = room_data.get("scores", {})
+    if not scores:
+        scores = {user: 2000 for user in room_data["positions"].keys()}
+        room_data["scores"] = scores
+
+    # Calculate scores based on melds
+    player_scores = {}
+    for position, melds in room_data["game_state"]["players_melds"].items():
+        player_score = 0
+        for meld in melds:
+            if meld['meld_type'] == 'pong':
+                tile_id = meld['tiles'][0]['id']
+                player_score += 4 if tile_id in [0, 8] else 2
+            elif meld['meld_type'] == 'kong':
+                tile_id = meld['tiles'][0]['id']
+                player_score += 8 if tile_id in [0, 8] else 4
+            elif meld['meld_type'] == 'chi':
+                player_score += 1  # Assign 1 point for each chi meld
+        player_scores[position] = player_score
+
+    # Determine the winner based on the highest score
+    winner_position = max(player_scores, key=player_scores.get)
+    winner_score = player_scores[winner_position]
+    winner = next(user for user, pos in room_data["positions"].items() if pos == winner_position)
+
+    # Adjust scores: losers pay the winner
+    for user, position in room_data["positions"].items():
+        if user == winner:
+            for loser, loser_position in room_data["positions"].items():
+                if loser != winner:
+                    if winner_position == "east":
+                        scores[winner] += 2 * winner_score
+                        scores[loser] -= 2 * winner_score
+                    else:
+                        scores[winner] += winner_score
+                        scores[loser] -= winner_score
+
+    return scores, winner
+
+def settle_scores_old(room, winner, win_score):
     room_data = rooms[room]
     scores = room_data.get("scores", {})
     if not scores:
@@ -623,7 +676,7 @@ def on_claim_meld(data):
     win, score = check_win_and_score(room, username)
     if win:
          new_scores = settle_scores(room, username, score)
-         socketio.emit('game_over', {'winner': username, 'score_table': new_scores}, room=room)
+         socketio.emit('game_over', {'winner': username, "reason": "win", 'score_table': new_scores}, room=room)
 
 @socketio.on('check_meld')
 def on_check_meld(data):
