@@ -26,7 +26,7 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 rooms = {}
 
 # Enable test mode so that we get a predictable deck order.
-TEST_MODE = False
+TEST_MODE = True
 
 # Turn order
 POSITIONS = ["north", "east", "south", "west"]
@@ -117,7 +117,8 @@ def handle_ai_turn(room_id: str, bot_username: str):
                meld_claimed = True
                
     if not deck:
-        socketio.emit('game_over',{'winner':None,'score_table':room_id["scores"],'reason':'draw—no tiles left'},room=room_id)
+        scores, winner = settle_scores(room_id, None, 0)
+        socketio.emit('game_over',{'winner':winner,'score_table':scores,'reason':'draw—no tiles left'},room=room_id)
         return
     
     if deck and not meld_claimed:
@@ -198,9 +199,9 @@ def ai_discard_tile(room_id: str, username: str):
     # check win
     win, score = check_win_and_score(room_id, username)
     if win:
-        new_scores = settle_scores(room_id, username, score)
+        new_scores, winner = settle_scores(room_id, username, score)
         socketio.emit('game_over', {
-            'winner': username,
+            'winner': winner,
             'score_table': new_scores,
             'reason': 'win'
         }, room=room_id)
@@ -356,10 +357,12 @@ def on_draw_tile(data):
 
     deck = rd["game_state"]["remaining_deck"]
     if not deck:
-        emit('error', {'message': 'No more tiles to draw.'})
-        return
+    #     emit('error', {'message': 'No more tiles to draw.'})
+    #     return
 
-    if not deck:
+    # if not deck:
+        # check for win or draw
+            win, score = settle_scores(room, user)
             socketio.emit('game_over',{'winner':None,'score_table':rd["scores"],'reason':'draw—no tiles left'},room=rd["room"])
             return
     tile = deck.pop(0)

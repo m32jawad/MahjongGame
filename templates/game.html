@@ -33,7 +33,7 @@
         display: flex;
         justify-content: center;
         align-items: center;
-        padding: 40px 0px;
+        /* padding: 40px 0px; */
       }
       /* Player areas with adjusted widths/heights */
       .player-area {
@@ -52,7 +52,7 @@
         justify-content: space-between;
         align-items: center;
         min-height: 600px;
-        padding: 40px 0px;
+        padding: 20px 0px;
       }
       /* bottom area for the south */
       .bottom-area {
@@ -61,7 +61,7 @@
         display: flex;
         justify-content: center;
         align-items: center;
-        padding: 40px 0px;
+        /* padding: 40px 0px;*/
       }
       #north {
         /* top: 10px; */
@@ -112,14 +112,15 @@
         margin-bottom: 10px;
         max-height: 120px;
         /* overflow-y: auto; */
+        padding: 50px
       }
       #discard-pile img {
-        width: 50px;
+        width: 30px;
         margin: 2px;
       }
       /* Hand styling */
       .hand img {
-        width: 50px;
+        width: 30px;
         margin: 2px;
         cursor: pointer;
       }
@@ -136,18 +137,23 @@
         background: rgba(0, 0, 0, 0.3);
       }
       .meld-box img {
-        width: 40px;
+        width: 30px;
         margin: 1px;
       }
       /* Button styling */
       #draw-tile-btn,
       #claim-meld-container button {
         padding: 5px 10px;
+        background-color: #4caf50;
+        color: white;
+        border: none;
+        border-radius: 4px;
         margin-top: 10px;
       }
       #claim-meld-container {
         margin-top: 10px;
         display: none;
+        position: absolute;
       }
       /* Chat area styling */
       #chat {
@@ -516,6 +522,50 @@
           currentPlayerArea.classList.add("current-turn");
         }
 
+        socket.on("game_over", function (data) {
+        let tableHtml = "<h3>Game Over! Winner: " + data.winner + "</h3>";
+        tableHtml +=
+          "<table border='1' style='width:100%; color:#fff;'><tr><th>Player</th><th>Score</th></tr>";
+        for (let player in data.score_table) {
+          tableHtml +=
+            "<tr><td>" +
+            player +
+            "</td><td>" +
+            data.score_table[player] +
+            "</td></tr>";
+        }
+        tableHtml += "</table>";
+        const popup = document.createElement("div");
+        popup.id = "game-over-popup";
+        popup.style.position = "fixed";
+        popup.style.top = "50%";
+        popup.style.left = "50%";
+        popup.style.transform = "translate(-50%, -50%)";
+        popup.style.backgroundColor = "rgba(0, 0, 0, 0.9)";
+        popup.style.color = "#fff";
+        popup.style.padding = "20px";
+        popup.style.borderRadius = "8px";
+        popup.style.boxShadow = "0 4px 8px rgba(0, 0, 0, 0.3)";
+        popup.style.zIndex = "1000";
+        popup.innerHTML = tableHtml;
+
+        const closeButton = document.createElement("button");
+        closeButton.textContent = "Close";
+        closeButton.style.marginTop = "10px";
+        closeButton.style.padding = "8px 15px";
+        closeButton.style.backgroundColor = "#4caf50";
+        closeButton.style.color = "white";
+        closeButton.style.border = "none";
+        closeButton.style.borderRadius = "4px";
+        closeButton.style.cursor = "pointer";
+        closeButton.onclick = function () {
+          document.body.removeChild(popup);
+        };
+
+        popup.appendChild(closeButton);
+        document.body.appendChild(popup);
+        });
+
         if (myPosition === currentTurn) {
           // Show the notification
           const notification = document.getElementById("turn-notification");
@@ -604,7 +654,7 @@
             "</td></tr>";
         }
         tableHtml += "</table>";
-        document.getElementById("game-board").innerHTML = tableHtml;
+        /* document.getElementById("game-board").innerHTML = tableHtml; */
       });
 
       // Display error messages
