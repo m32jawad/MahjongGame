@@ -26,7 +26,7 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 rooms = {}
 
 # Enable test mode so that we get a predictable deck order.
-TEST_MODE = True
+TEST_MODE = False
 
 # Turn order
 POSITIONS = ["north", "east", "south", "west"]
