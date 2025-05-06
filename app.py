@@ -14,7 +14,6 @@ from game_logic.mahjong import (
     can_claim_kong,
     Tile
 )
-from game_logic.mahjong_mcts import MahjongMCTS, MCTSConfig
 
 NGROK_ACCESS_TOKEN = "2u4fhbHxSuoU8f80aTtpez81L3X_7hAz7AwyFrRuvpP9Fpsq2"
 NGROK_DOMAIN = "sunbird-close-newt.ngrok-free.app"
@@ -27,18 +26,10 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 rooms = {}
 
 # Enable test mode so that we get a predictable deck order.
-TEST_MODE = True
+TEST_MODE = False
 
 # Turn order
 POSITIONS = ["north", "east", "south", "west"]
-
-# Initialize MCTS with configuration
-mcts_config = MCTSConfig(
-    num_simulations=500,  # Adjust based on performance needs
-    max_time_per_move=1.0,
-    exploration_constant=1.41
-)
-mahjong_mcts = MahjongMCTS(mcts_config)
 
 def create_test_deck():
     full_deck = create_deck()
@@ -91,83 +82,52 @@ def schedule_ai_move(room_id: str):
         Thread(target=handle_ai_turn, args=(room_id, next_user)).start()
 
 def handle_ai_turn(room_id: str, bot_username: str):
-    """Bot uses MCTS to decide its move"""
+    """Bot draws one tile, then discards via ai_discard_tile."""
     sleep(1.5)  # give a slight pause
     
     room_data = rooms[room_id]
     position = room_data["positions"][bot_username]
-    
-    # Get best action using MCTS
-    best_action, stats = mahjong_mcts.get_best_action(room_data, bot_username)
-    
-    # Execute the chosen action
-    if best_action['type'] == 'discard':
-        # Discard the chosen tile
-        hand = room_data["game_state"]["players_hands"][position]
-        tile_id = best_action['tile'].id
-        tile_to_discard = next((t for t in hand if t.id == tile_id), None)
-        
-        if tile_to_discard:
-            hand.remove(tile_to_discard)
-            room_data["game_state"]["discard_pile"].append(tile_to_discard)
-            room_data["game_state"]["last_discard"] = tile_to_discard
-            
-            emit_data = {
-                'username': bot_username,
-                'tile': {
-                    'id': tile_to_discard.id,
-                    'name': tile_to_discard.name,
-                    'suit': tile_to_discard.suit,
-                    'image_path': tile_to_discard.image_path
-                }
-            }
-            socketio.emit('tile_discarded', emit_data, room=room_id)
-        else:
-            # If tile not found, pick a random tile to discard
-            if hand:
-                tile_to_discard = random.choice(hand)
-                hand.remove(tile_to_discard)
-                room_data["game_state"]["discard_pile"].append(tile_to_discard)
-                room_data["game_state"]["last_discard"] = tile_to_discard
-                
-                emit_data = {
+    deck = room_data["game_state"]["remaining_deck"]
+     # Check if the bot can claim a meld
+    last_discard = room_data["game_state"].get("last_discard")
+    meld_claimed = False
+    if last_discard:
+          bot_hand = room_data["game_state"]["players_hands"][position]
+          can_claim_flag, _ = can_claim_chi(bot_hand, last_discard)
+          if can_claim_pong(bot_hand, last_discard):
+               on_claim_meld({
+                    'room': room_id,
                     'username': bot_username,
-                    'tile': {
-                        'id': tile_to_discard.id,
-                        'name': tile_to_discard.name,
-                        'suit': tile_to_discard.suit,
-                        'image_path': tile_to_discard.image_path
-                    }
-                }
-                socketio.emit('tile_discarded', emit_data, room=room_id)
-        
-    elif best_action['type'] in ['pong', 'chi', 'kong']:
-        # Claim the meld
-        on_claim_meld({
-            'room': room_id,
-            'username': bot_username,
-            'meld_type': best_action['type']
-        })
+                    'meld_type': 'pong'
+               })
+               meld_claimed = True
+          elif can_claim_flag:
+               on_claim_meld({
+                    'room': room_id,
+                    'username': bot_username,
+                    'meld_type': 'chi'
+               })
+               meld_claimed = True
+          elif can_claim_kong(bot_hand, last_discard):
+               on_claim_meld({
+                    'room': room_id,
+                    'username': bot_username,
+                    'meld_type': 'kong'
+               })
+               meld_claimed = True
+               
+    if not deck:
+        scores, winner = settle_scores(room_id, None, 0)
+        socketio.emit('game_over',{'winner':winner,'score_table':scores,'reason':'draw—no tiles left'},room=room_id)
+        return
     
-    # advance turn
-    next_pos = get_next_turn(position)
-    room_data["game_state"]["current_turn"] = next_pos
-    socketio.emit('turn_update', {'current_turn': next_pos}, room=room_id)
-    
-    # check win
-    win, score = check_win_and_score(room_id, bot_username)
-    if win:
-        new_scores, winner = settle_scores(room_id, bot_username, score)
-        socketio.emit('game_over', {
-            'winner': winner,
-            'score_table': new_scores,
-            'reason': 'win'
-        }, room=room_id)
-    
-    update_hand_counts(room_id)
-    
-    # chain into next bot if needed
-    schedule_ai_move(room_id)
+    if deck and not meld_claimed:
+        drawn = deck.pop(0)
+        room_data["game_state"]["players_hands"][position].append(drawn)
+        # update other players' view of hand counts
+        update_hand_counts(room_id)
+    # now discard
+    ai_discard_tile(room_id, bot_username)
 
 def ai_discard_tile(room_id: str, username: str):
     """Heuristic for medium‑level AI: discard tiles least useful for melds."""
