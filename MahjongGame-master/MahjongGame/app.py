@@ -4,6 +4,7 @@ import uuid
 import random
 from threading import Thread
 from time import sleep
+from pyngrok import ngrok
 
 from game_logic.mahjong import (
     create_deck,
@@ -14,7 +15,6 @@ from game_logic.mahjong import (
     can_claim_kong,
     Tile
 )
-from game_logic.mahjong_mcts import MahjongMCTS, MCTSConfig
 
 NGROK_ACCESS_TOKEN = "2u4fhbHxSuoU8f80aTtpez81L3X_7hAz7AwyFrRuvpP9Fpsq2"
 NGROK_DOMAIN = "sunbird-close-newt.ngrok-free.app"
@@ -27,18 +27,10 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 rooms = {}
 
 # Enable test mode so that we get a predictable deck order.
-TEST_MODE = True
+TEST_MODE = False
 
 # Turn order
 POSITIONS = ["north", "east", "south", "west"]
-
-# Initialize MCTS with configuration
-mcts_config = MCTSConfig(
-    num_simulations=500,  # Adjust based on performance needs
-    max_time_per_move=1.0,
-    exploration_constant=1.41
-)
-mahjong_mcts = MahjongMCTS(mcts_config)
 
 def create_test_deck():
     full_deck = create_deck()
@@ -91,83 +83,46 @@ def schedule_ai_move(room_id: str):
         Thread(target=handle_ai_turn, args=(room_id, next_user)).start()
 
 def handle_ai_turn(room_id: str, bot_username: str):
-    """Bot uses MCTS to decide its move"""
+    """Bot draws one tile, then discards via ai_discard_tile."""
     sleep(1.5)  # give a slight pause
     
     room_data = rooms[room_id]
     position = room_data["positions"][bot_username]
-    
-    # Get best action using MCTS
-    best_action, stats = mahjong_mcts.get_best_action(room_data, bot_username)
-    
-    # Execute the chosen action
-    if best_action['type'] == 'discard':
-        # Discard the chosen tile
-        hand = room_data["game_state"]["players_hands"][position]
-        tile_id = best_action['tile'].id
-        tile_to_discard = next((t for t in hand if t.id == tile_id), None)
-        
-        if tile_to_discard:
-            hand.remove(tile_to_discard)
-            room_data["game_state"]["discard_pile"].append(tile_to_discard)
-            room_data["game_state"]["last_discard"] = tile_to_discard
-            
-            emit_data = {
-                'username': bot_username,
-                'tile': {
-                    'id': tile_to_discard.id,
-                    'name': tile_to_discard.name,
-                    'suit': tile_to_discard.suit,
-                    'image_path': tile_to_discard.image_path
-                }
-            }
-            socketio.emit('tile_discarded', emit_data, room=room_id)
-        else:
-            # If tile not found, pick a random tile to discard
-            if hand:
-                tile_to_discard = random.choice(hand)
-                hand.remove(tile_to_discard)
-                room_data["game_state"]["discard_pile"].append(tile_to_discard)
-                room_data["game_state"]["last_discard"] = tile_to_discard
-                
-                emit_data = {
+    deck = room_data["game_state"]["remaining_deck"]
+     # Check if the bot can claim a meld
+    last_discard = room_data["game_state"].get("last_discard")
+    meld_claimed = False
+    if last_discard:
+          bot_hand = room_data["game_state"]["players_hands"][position]
+          can_claim_flag, _ = can_claim_chi(bot_hand, last_discard)
+          if can_claim_pong(bot_hand, last_discard):
+               on_claim_meld({
+                    'room': room_id,
                     'username': bot_username,
-                    'tile': {
-                        'id': tile_to_discard.id,
-                        'name': tile_to_discard.name,
-                        'suit': tile_to_discard.suit,
-                        'image_path': tile_to_discard.image_path
-                    }
-                }
-                socketio.emit('tile_discarded', emit_data, room=room_id)
-        
-    elif best_action['type'] in ['pong', 'chi', 'kong']:
-        # Claim the meld
-        on_claim_meld({
-            'room': room_id,
-            'username': bot_username,
-            'meld_type': best_action['type']
-        })
-    
-    # advance turn
-    next_pos = get_next_turn(position)
-    room_data["game_state"]["current_turn"] = next_pos
-    socketio.emit('turn_update', {'current_turn': next_pos}, room=room_id)
-    
-    # check win
-    win, score = check_win_and_score(room_id, bot_username)
-    if win:
-        new_scores, winner = settle_scores(room_id, bot_username, score)
-        socketio.emit('game_over', {
-            'winner': winner,
-            'score_table': new_scores,
-            'reason': 'win'
-        }, room=room_id)
-    
-    update_hand_counts(room_id)
-    
-    # chain into next bot if needed
-    schedule_ai_move(room_id)
+                    'meld_type': 'pong'
+               })
+               meld_claimed = True
+          elif can_claim_flag:
+               on_claim_meld({
+                    'room': room_id,
+                    'username': bot_username,
+                    'meld_type': 'chi'
+               })
+               meld_claimed = True
+          elif can_claim_kong(bot_hand, last_discard):
+               on_claim_meld({
+                    'room': room_id,
+                    'username': bot_username,
+                    'meld_type': 'kong'
+               })
+               meld_claimed = True
+    if deck and not meld_claimed:
+        drawn = deck.pop(0)
+        room_data["game_state"]["players_hands"][position].append(drawn)
+        # update other players' view of hand counts
+        update_hand_counts(room_id)
+    # now discard
+    ai_discard_tile(room_id, bot_username)
 
 def ai_discard_tile(room_id: str, username: str):
     """Heuristic for medium‑level AI: discard tiles least useful for melds."""
@@ -239,11 +194,10 @@ def ai_discard_tile(room_id: str, username: str):
     # check win
     win, score = check_win_and_score(room_id, username)
     if win:
-        new_scores, winner = settle_scores(room_id, username, score)
+        new_scores = settle_scores(room_id, username, score)
         socketio.emit('game_over', {
-            'winner': winner,
-            'score_table': new_scores,
-            'reason': 'win'
+            'winner': username,
+            'score_table': new_scores
         }, room=room_id)
 
     update_hand_counts(room_id)
@@ -397,14 +351,9 @@ def on_draw_tile(data):
 
     deck = rd["game_state"]["remaining_deck"]
     if not deck:
-    #     emit('error', {'message': 'No more tiles to draw.'})
-    #     return
+        emit('error', {'message': 'No more tiles to draw.'})
+        return
 
-    # if not deck:
-        # check for win or draw
-            win, score = settle_scores(room, user)
-            socketio.emit('game_over',{'winner':None,'score_table':rd["scores"],'reason':'draw—no tiles left'},room=rd["room"])
-            return
     tile = deck.pop(0)
     rd["game_state"]["players_hands"][pos].append(tile)
 
@@ -473,8 +422,7 @@ def on_discard_tile(data):
         new_scores = settle_scores(room, user, score)
         socketio.emit('game_over', {
             'winner': user,
-            'score_table': new_scores,
-            "reason": 'win'
+            'score_table': new_scores
         }, room=room)
         return
 
@@ -557,50 +505,7 @@ def compute_score(hand, melds, win_details):
          score += 2
     return score
 
-
-
-def settle_scores(room, winner=None, win_score=0):
-    room_data = rooms[room]
-    scores = room_data.get("scores", {})
-    if not scores:
-        scores = {user: 2000 for user in room_data["positions"].keys()}
-        room_data["scores"] = scores
-
-    # Calculate scores based on melds
-    player_scores = {}
-    for position, melds in room_data["game_state"]["players_melds"].items():
-        player_score = 0
-        for meld in melds:
-            if meld['meld_type'] == 'pong':
-                tile_id = meld['tiles'][0]['id']
-                player_score += 4 if tile_id in [0, 8] else 2
-            elif meld['meld_type'] == 'kong':
-                tile_id = meld['tiles'][0]['id']
-                player_score += 8 if tile_id in [0, 8] else 4
-            elif meld['meld_type'] == 'chi':
-                player_score += 1  # Assign 1 point for each chi meld
-        player_scores[position] = player_score
-
-    # Determine the winner based on the highest score
-    winner_position = max(player_scores, key=player_scores.get)
-    winner_score = player_scores[winner_position]
-    winner = next(user for user, pos in room_data["positions"].items() if pos == winner_position)
-
-    # Adjust scores: losers pay the winner
-    for user, position in room_data["positions"].items():
-        if user == winner:
-            for loser, loser_position in room_data["positions"].items():
-                if loser != winner:
-                    if winner_position == "east":
-                        scores[winner] += 2 * winner_score
-                        scores[loser] -= 2 * winner_score
-                    else:
-                        scores[winner] += winner_score
-                        scores[loser] -= winner_score
-
-    return scores, winner
-
-def settle_scores_old(room, winner, win_score):
+def settle_scores(room, winner, win_score):
     room_data = rooms[room]
     scores = room_data.get("scores", {})
     if not scores:
@@ -719,7 +624,7 @@ def on_claim_meld(data):
     win, score = check_win_and_score(room, username)
     if win:
          new_scores = settle_scores(room, username, score)
-         socketio.emit('game_over', {'winner': username, "reason": "win", 'score_table': new_scores}, room=room)
+         socketio.emit('game_over', {'winner': username, 'score_table': new_scores}, room=room)
 
 @socketio.on('check_meld')
 def on_check_meld(data):
@@ -761,6 +666,23 @@ def on_chat_message(data):
 @socketio.on('connect')
 def on_connect():
      emit('connection_success', {'message': 'Connected successfully!'}, broadcast=True)
+
+
+PORT = 5000
+try:
+    # Set your Ngrok access token
+    ngrok.set_auth_token(NGROK_ACCESS_TOKEN)
+
+    # Disconnect any existing tunnels
+    for tunnel in ngrok.get_tunnels():
+        ngrok.disconnect(tunnel.public_url)
+
+    # Open an Ngrok tunnel with the reserved subdomain
+    public_url = ngrok.connect(PORT, domain=NGROK_DOMAIN)
+    print("Ngrok tunnel available at:", public_url)
+except Exception as e:
+    print(f"Failed to setup Ngrok tunnel: {str(e)}")
+    print("Continuing without Ngrok tunnel...")
 
 if __name__ == '__main__':
     socketio.run(app, port=5000, debug=True)

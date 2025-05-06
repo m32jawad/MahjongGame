@@ -4,7 +4,7 @@ import uuid
 import random
 from threading import Thread
 from time import sleep
-
+import logging
 from game_logic.mahjong import (
     create_deck,
     shuffle_deck,
@@ -14,7 +14,14 @@ from game_logic.mahjong import (
     can_claim_kong,
     Tile
 )
-from game_logic.mahjong_mcts import MahjongMCTS, MCTSConfig
+from game_logic.mcts import MCTS
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 NGROK_ACCESS_TOKEN = "2u4fhbHxSuoU8f80aTtpez81L3X_7hAz7AwyFrRuvpP9Fpsq2"
 NGROK_DOMAIN = "sunbird-close-newt.ngrok-free.app"
@@ -27,18 +34,8 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 rooms = {}
 
 # Enable test mode so that we get a predictable deck order.
-TEST_MODE = True
-
-# Turn order
+TEST_MODE = False# Turn order
 POSITIONS = ["north", "east", "south", "west"]
-
-# Initialize MCTS with configuration
-mcts_config = MCTSConfig(
-    num_simulations=500,  # Adjust based on performance needs
-    max_time_per_move=1.0,
-    exploration_constant=1.41
-)
-mahjong_mcts = MahjongMCTS(mcts_config)
 
 def create_test_deck():
     full_deck = create_deck()
@@ -91,165 +88,237 @@ def schedule_ai_move(room_id: str):
         Thread(target=handle_ai_turn, args=(room_id, next_user)).start()
 
 def handle_ai_turn(room_id: str, bot_username: str):
-    """Bot uses MCTS to decide its move"""
-    sleep(1.5)  # give a slight pause
-    
-    room_data = rooms[room_id]
-    position = room_data["positions"][bot_username]
-    
-    # Get best action using MCTS
-    best_action, stats = mahjong_mcts.get_best_action(room_data, bot_username)
-    
-    # Execute the chosen action
-    if best_action['type'] == 'discard':
-        # Discard the chosen tile
-        hand = room_data["game_state"]["players_hands"][position]
-        tile_id = best_action['tile'].id
-        tile_to_discard = next((t for t in hand if t.id == tile_id), None)
+    """Handle AI player's turn."""
+    try:
+        room = rooms[room_id]
+        game_state = room["game_state"]
+        position = room["positions"][bot_username]
+        bot_hand = game_state["players_hands"][position]
         
-        if tile_to_discard:
-            hand.remove(tile_to_discard)
-            room_data["game_state"]["discard_pile"].append(tile_to_discard)
-            room_data["game_state"]["last_discard"] = tile_to_discard
+        if not bot_hand:
+            logger.error(f"No tiles in hand for {bot_username}")
+            return
             
-            emit_data = {
+        # Create a copy of the state for MCTS
+        mcts_state = {
+            "current_hand": bot_hand.copy(),
+            "discard_pile": game_state["discard_pile"].copy(),
+            "melds": game_state.get("players_melds", {}).get(position, {}).copy(),
+            "last_discard": game_state.get("last_discard")
+        }
+        
+        # Initialize MCTS
+        mcts = MCTS(max_iterations=500)
+        
+        # Get best action from MCTS
+        try:
+            action_type, tile = mcts.get_best_action(mcts_state)
+            logger.info(f"MCTS selected action: {action_type} with tile {tile}")
+        except Exception as e:
+            logger.error(f"MCTS failed: {str(e)}")
+            # Fallback to random discard
+            if bot_hand:
+                action_type = "discard"
+                tile = random.choice(bot_hand)
+            else:
+                logger.error("No tiles available for fallback")
+                return
+        
+        # Process the action
+        if action_type == "discard":
+            # Find and remove the tile from hand
+            for i, t in enumerate(bot_hand):
+                if t.id == tile.id and t.suit == tile.suit:
+                    discarded_tile = bot_hand.pop(i)
+                    game_state["discard_pile"].append(discarded_tile)
+                    game_state["last_discard"] = discarded_tile
+                    break
+            
+            # Update turn
+            current_turn = game_state["current_turn"]
+            positions = ["north", "east", "south", "west"]  # Use lowercase to match game state
+            current_index = positions.index(current_turn)
+            next_index = (current_index + 1) % 4
+            game_state["current_turn"] = positions[next_index]
+            
+            # Emit events
+            socketio.emit("tile_discarded", {
+                "username": bot_username,
+                "tile": {"id": discarded_tile.id, "suit": discarded_tile.suit}
+            }, room=room_id)
+            
+            socketio.emit("game_state_update", {
+                "players_hands": {pos: [{"id": t.id, "suit": t.suit} for t in hand] 
+                                for pos, hand in game_state["players_hands"].items()},
+                "discard_pile": [{"id": t.id, "suit": t.suit} for t in game_state["discard_pile"]],
+                "current_turn": game_state["current_turn"]
+            }, room=room_id)
+            
+        elif action_type in ["pong", "chi", "kong"]:
+            # Handle meld claims
+            if "players_melds" not in game_state:
+                game_state["players_melds"] = {}
+            if position not in game_state["players_melds"]:
+                game_state["players_melds"][position] = []
+            
+            # Find and remove the tile from hand
+            for i, t in enumerate(bot_hand):
+                if t.id == tile.id and t.suit == tile.suit:
+                    meld_tile = bot_hand.pop(i)
+                    game_state["players_melds"][position].append({
+                        "meld_type": action_type,
+                        "tiles": [{"id": meld_tile.id, "suit": meld_tile.suit}]
+                    })
+                    break
+            
+            # Emit meld claim event
+            socketio.emit("meld_claimed", {
+                "username": bot_username,
+                "meld_type": action_type,
+                "tile": {"id": tile.id, "suit": tile.suit}
+            }, room=room_id)
+            
+            # Update game state
+            socketio.emit("game_state_update", {
+                "players_hands": {pos: [{"id": t.id, "suit": t.suit} for t in hand] 
+                                for pos, hand in game_state["players_hands"].items()},
+                "players_melds": game_state["players_melds"],
+                "current_turn": game_state["current_turn"]
+            }, room=room_id)
+            
+    except Exception as e:
+        logger.error(f"Error in AI turn: {str(e)}")
+        # Ensure turn progresses even if there's an error
+        if room_id in rooms:
+            game_state = rooms[room_id]["game_state"]
+            current_turn = game_state["current_turn"]
+            positions = ["north", "east", "south", "west"]  # Use lowercase to match game state
+            current_index = positions.index(current_turn)
+            next_index = (current_index + 1) % 4
+            game_state["current_turn"] = positions[next_index]
+            
+            socketio.emit("game_state_update", {
+                "current_turn": game_state["current_turn"]
+            }, room=room_id)
+
+def ai_discard_tile(room_id: str, bot_username: str):
+    """AI decides which tile to discard."""
+    try:
+        room = rooms[room_id]
+        if not room or "game_state" not in room:
+            logger.error("Invalid room data or game state")
+            return
+            
+        position = room["positions"][bot_username]
+        hand = room["game_state"]["players_hands"][position]
+        
+        if not hand:
+            logger.error("Bot hand is empty")
+            return
+        
+        # Create MCTS instance for discard decision
+        mcts = MCTS(max_iterations=1000)
+        
+        # Create state for MCTS
+        state = {
+            "current_hand": hand.copy(),
+            "discard_pile": room["game_state"]["discard_pile"].copy(),
+            "melds": room["game_state"].get("players_melds", {}).get(position, {}).copy(),
+            "last_discard": room["game_state"]["last_discard"]
+        }
+        
+        try:
+            # Get best action from MCTS
+            action_type, tile_to_discard = mcts.get_best_action(state)
+            
+            # Find and remove the tile from hand
+            for i, tile in enumerate(hand):
+                if tile.id == tile_to_discard.id and tile.suit == tile_to_discard.suit:
+                    hand.pop(i)
+                    break
+                    
+            # Add to discard pile
+            room["game_state"]["discard_pile"].append(tile_to_discard)
+            room["game_state"]["last_discard"] = tile_to_discard
+            
+            # Emit discard event
+            socketio.emit('tile_discarded', {
                 'username': bot_username,
                 'tile': {
                     'id': tile_to_discard.id,
-                    'name': tile_to_discard.name,
-                    'suit': tile_to_discard.suit,
-                    'image_path': tile_to_discard.image_path
+                    'suit': tile_to_discard.suit
                 }
-            }
-            socketio.emit('tile_discarded', emit_data, room=room_id)
-        else:
-            # If tile not found, pick a random tile to discard
-            if hand:
-                tile_to_discard = random.choice(hand)
-                hand.remove(tile_to_discard)
-                room_data["game_state"]["discard_pile"].append(tile_to_discard)
-                room_data["game_state"]["last_discard"] = tile_to_discard
+            }, room=room_id)
+            
+            # Move to next player
+            next_player = get_next_turn(room["game_state"]["current_turn"])
+            room["game_state"]["current_turn"] = next_player
+            
+            # Emit turn update
+            socketio.emit('turn_update', {
+                'current_turn': next_player
+            }, room=room_id)
+            
+            # If next player is AI, handle their turn
+            if next_player in room["bots"]:
+                socketio.start_background_task(handle_ai_turn, room_id, next_player)
                 
-                emit_data = {
+        except Exception as e:
+            logger.error(f"Error in MCTS discard decision: {str(e)}")
+            # Fallback to random discard if MCTS fails
+            if hand:
+                random_tile = random.choice(hand)
+                hand.remove(random_tile)
+                room["game_state"]["discard_pile"].append(random_tile)
+                room["game_state"]["last_discard"] = random_tile
+                
+                socketio.emit('tile_discarded', {
                     'username': bot_username,
                     'tile': {
-                        'id': tile_to_discard.id,
-                        'name': tile_to_discard.name,
-                        'suit': tile_to_discard.suit,
-                        'image_path': tile_to_discard.image_path
+                        'id': random_tile.id,
+                        'suit': random_tile.suit
                     }
-                }
-                socketio.emit('tile_discarded', emit_data, room=room_id)
-        
-    elif best_action['type'] in ['pong', 'chi', 'kong']:
-        # Claim the meld
-        on_claim_meld({
-            'room': room_id,
-            'username': bot_username,
-            'meld_type': best_action['type']
-        })
-    
-    # advance turn
-    next_pos = get_next_turn(position)
-    room_data["game_state"]["current_turn"] = next_pos
-    socketio.emit('turn_update', {'current_turn': next_pos}, room=room_id)
-    
-    # check win
-    win, score = check_win_and_score(room_id, bot_username)
-    if win:
-        new_scores, winner = settle_scores(room_id, bot_username, score)
-        socketio.emit('game_over', {
-            'winner': winner,
-            'score_table': new_scores,
-            'reason': 'win'
-        }, room=room_id)
-    
-    update_hand_counts(room_id)
-    
-    # chain into next bot if needed
-    schedule_ai_move(room_id)
-
-def ai_discard_tile(room_id: str, username: str):
-    """Heuristic for medium‑level AI: discard tiles least useful for melds."""
-    room_data = rooms[room_id]
-    position = room_data["positions"][username]
-    hand = room_data["game_state"]["players_hands"][position]
-
-    # # 1) find all tiles whose removal DOES NOT break meld potential
-    # candidates = []
-    # for t in hand:
-    #     temp = hand.copy()
-    #     temp.remove(t)
-    #     if not can_form_sets([tile.id for tile in temp]):
-    #         candidates.append(t)
-
-    # # 2) pick one
-    
-    # tile_to_discard = candidates[0] if candidates else hand[0]
-
-    # 2  Build a score for each tile
-    scores = {}
-    for t in hand:
-        s = 0
-        # 1) Pong potential
-        copies = sum(1 for x in hand if x.id == t.id) - 1
-        s += copies
-
-        # 2) Chow potential (suited only)
-        if 0 <= t.id <= 26:
-            for neighbor in (t.id - 2, t.id - 1, t.id + 1, t.id + 2):
-                if any(x.id == neighbor for x in hand):
-                    s += 1
-
-        # 3) Isolation penalty
-        if copies == 0 and not (0 <= t.id <= 26 and any(
-                abs(x.id - t.id) in (1,2) for x in hand)):
-            s -= 1
-
-        scores[t] = s
-
-    # Find the lowest‑scoring tile(s)
-    min_score = min(scores.values())
-    candidates = [t for t,sc in scores.items() if sc == min_score]
-
-    # Tie-breaker: pick the one with highest ID
-    tile_to_discard = max(candidates, key=lambda t: t.id)
-
-    # 3) remove it and broadcast
-    hand.remove(tile_to_discard)
-    room_data["game_state"]["discard_pile"].append(tile_to_discard)
-    room_data["game_state"]["last_discard"] = tile_to_discard
-
-    emit_data = {
-        'username': username,
-        'tile': {
-            'id': tile_to_discard.id,
-            'name': tile_to_discard.name,
-            'suit': tile_to_discard.suit,
-            'image_path': tile_to_discard.image_path
-        }
-    }
-    socketio.emit('tile_discarded', emit_data, room=room_id)
-
-    # advance turn
-    next_pos = get_next_turn(position)
-    room_data["game_state"]["current_turn"] = next_pos
-    socketio.emit('turn_update', {'current_turn': next_pos}, room=room_id)
-
-    # check win
-    win, score = check_win_and_score(room_id, username)
-    if win:
-        new_scores, winner = settle_scores(room_id, username, score)
-        socketio.emit('game_over', {
-            'winner': winner,
-            'score_table': new_scores,
-            'reason': 'win'
-        }, room=room_id)
-
-    update_hand_counts(room_id)
-
-    # chain into next bot if needed
-    schedule_ai_move(room_id)
+                }, room=room_id)
+                
+                next_player = get_next_turn(room["game_state"]["current_turn"])
+                room["game_state"]["current_turn"] = next_player
+                
+                socketio.emit('turn_update', {
+                    'current_turn': next_player
+                }, room=room_id)
+                
+                if next_player in room["bots"]:
+                    socketio.start_background_task(handle_ai_turn, room_id, next_player)
+            
+    except Exception as e:
+        logger.error(f"Error in AI discard: {str(e)}")
+        # Fallback to random discard if MCTS fails
+        try:
+            if hand:
+                random_tile = random.choice(hand)
+                hand.remove(random_tile)
+                room["game_state"]["discard_pile"].append(random_tile)
+                room["game_state"]["last_discard"] = random_tile
+                
+                socketio.emit('tile_discarded', {
+                    'username': bot_username,
+                    'tile': {
+                        'id': random_tile.id,
+                        'suit': random_tile.suit
+                    }
+                }, room=room_id)
+                
+                next_player = get_next_turn(room["game_state"]["current_turn"])
+                room["game_state"]["current_turn"] = next_player
+                
+                socketio.emit('turn_update', {
+                    'current_turn': next_player
+                }, room=room_id)
+                
+                if next_player in room["bots"]:
+                    socketio.start_background_task(handle_ai_turn, room_id, next_player)
+        except Exception as e2:
+            logger.error(f"Error in AI discard fallback: {str(e2)}")
 
 # --- Flask routes ---
 @app.route('/')
@@ -355,12 +424,22 @@ def on_start_game(data):
         pos = room_data["positions"][p]
         sid = room_data["sids"].get(p)
         if sid:
-            socketio.emit('deal_hand', {
-                'hand': [{
-                    'id': t.id, 'name': t.name,
-                    'suit': t.suit, 'image_path': t.image_path
-                } for t in hands[pos]],
-                'position': pos
+            # Prepare hands for all players: full hand for user, counts for others
+            hands_for_client = {}
+            for other_p in participants:
+                other_pos = room_data["positions"][other_p]
+                if other_p == p:
+                    hands_for_client[other_pos] = [{
+                        'id': t.id, 'name': t.name,
+                        'suit': t.suit, 'image_path': t.image_path
+                    } for t in hands[other_pos]]
+                else:
+                    hands_for_client[other_pos] = len(hands[other_pos])
+            socketio.emit('game_state_update', {
+                'players_hands': hands_for_client,
+                'discard_pile': [],
+                'players_melds': {},
+                'current_turn': 'north'
             }, room=sid)
 
     # announce start
@@ -374,7 +453,6 @@ def on_start_game(data):
         'players': room_data["human_players"] + room_data['bots']
     }, room=room)
 
-    
     update_hand_counts(room)
     # if north is a bot, let it play immediately
     if next_u := next((u for u in room_data["bots"]
@@ -761,6 +839,34 @@ def on_chat_message(data):
 @socketio.on('connect')
 def on_connect():
      emit('connection_success', {'message': 'Connected successfully!'}, broadcast=True)
+
+# --- After every move (draw, discard, meld), emit game_state_update to all players ---
+def emit_game_state_update(room_id):
+    room_data = rooms[room_id]
+    participants = list(room_data["positions"].keys())
+    for p in participants:
+        pos = room_data["positions"][p]
+        sid = room_data["sids"].get(p)
+        if sid:
+            hands_for_client = {}
+            for other_p in participants:
+                other_pos = room_data["positions"][other_p]
+                if other_p == p:
+                    hands_for_client[other_pos] = [{
+                        'id': t.id, 'name': t.name,
+                        'suit': t.suit, 'image_path': t.image_path
+                    } for t in room_data["game_state"]["players_hands"][other_pos]]
+                else:
+                    hands_for_client[other_pos] = len(room_data["game_state"]["players_hands"][other_pos])
+            socketio.emit('game_state_update', {
+                'players_hands': hands_for_client,
+                'discard_pile': [{
+                    'id': t.id, 'name': t.name,
+                    'suit': t.suit, 'image_path': t.image_path
+                } for t in room_data["game_state"]["discard_pile"]],
+                'players_melds': room_data["game_state"].get("players_melds", {}),
+                'current_turn': room_data["game_state"]["current_turn"]
+            }, room=sid)
 
 if __name__ == '__main__':
     socketio.run(app, port=5000, debug=True)

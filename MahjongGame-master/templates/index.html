@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chinese Mahjong - Home</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            min-height: 100vh;
+            background-image: url("{{ url_for('static', filename='images/mahjong-bg.jpg') }}");
+            background-size: cover;
+            background-position: center;
+            background-attachment: fixed;
+            font-family: 'Noto Serif SC', serif;
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .container {
+            background: URL("/static/images/tiles/dead.jpg");
+            padding: 2rem;
+            border-radius: 15px;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+            text-align: center;
+            max-width: 600px;
+            width: 90%;
+        }
+
+        h1 {
+            font-size: 3rem;
+            margin-bottom: 2rem;
+            color: #f8d210;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+        }
+
+        h2 {
+            font-size: 2rem;
+            margin-bottom: 1.5rem;
+            color: #f8d210;
+        }
+
+        form {
+            margin: 1rem 0;
+        }
+
+        input {
+            padding: 0.8rem;
+            margin: 0.5rem;
+            border: none;
+            border-radius: 5px;
+            width: 80%;
+            max-width: 300px;
+            font-family: 'Noto Serif SC', serif;
+        }
+
+        button {
+            background-color: #d32f2f;
+            color: white;
+            padding: 1rem 2rem;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 1.1rem;
+            font-family: 'Noto Serif SC', serif;
+            transition: background-color 0.3s;
+            margin: 0.5rem;
+        }
+
+        button:hover {
+            background-color: #b71c1c;
+        }
+
+        hr {
+            border: 1px solid #f8d210;
+            width: 80%;
+            margin: 2rem auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Welcome to Chinese Mahjong</h1>
+        <form action="{{ url_for('create_room_route') }}" method="post">
+            <input type="text" name="username" placeholder="Enter your name" required>
+            <button type="submit">Create New Room</button>
+        </form>
+        <hr>
+        <h2>Join Room</h2>
+        <form action="/game" method="get" onsubmit="joinRoom(event)">
+            <input type="text" id="room_id" placeholder="Enter Room ID" required>
+            <input type="text" id="username" placeholder="Your Name" required>
+            <button type="submit">Join Room</button>
+        </form>
+    </div>
+
+    <script>
+        function joinRoom(e) {
+            e.preventDefault();
+            const roomId = document.getElementById('room_id').value;
+            const username = document.getElementById('username').value;
+            window.location.href = '/game/' + roomId + '?username=' + encodeURIComponent(username);
+        }
+
+        const urlParams = new URLSearchParams(window.location.search);
+        const roomIdParam = urlParams.get('room_id');
+        if (roomIdParam) {
+            document.getElementById('room_id').value = roomIdParam;
+        }
+    </script>
+</body>
+</html>
